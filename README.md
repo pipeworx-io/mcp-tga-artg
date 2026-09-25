@@ -2,7 +2,7 @@
 
 TGA ARTG — the Australian Register of Therapeutic Goods: every medicine, biological and medical device approved for supply in **Australia**. Search by product, active ingredient, sponsor or manufacturer, or pull the full record for one ARTG entry — sponsor, every ingredient with strength, indications, and links to its Product Information (PI) and Consumer Medicine Information (CMI) documents.
 
-Part of [Pipeworx](https://pipeworx.io) — an MCP gateway connecting AI agents to 1679+ live data sources.
+Part of [Pipeworx](https://pipeworx.io) — an MCP gateway connecting AI agents to 1681+ live data sources.
 
 ## Scope — Australia, and only Australia
 
@@ -14,6 +14,16 @@ For the US use `openfda`; EU-wide, `ema-medicines`; UK, `mhra-uk`; Canada, `heal
 |---|---|
 | `artg_search` | *Which Australian products contain ibuprofen?* — search by name/ingredient/sponsor/manufacturer |
 | `artg_entry` | *What is ARTG 10109?* — full ingredients, indications, PI/CMI links |
+| `artg_list` | *Give me every registered medicine in Australia* — walks the whole register (or one entry type) in ARTG-ID order, 100 per page, with `total` / `next_offset` |
+| `artg_recent` | *What was added to the ARTG since 2026-09-15?* — new entries only (see below) |
+
+Every response carries `source_url` (the exact upstream request) and `data_as_of` (fetch time — this is a live proxy, so there is no separate published version). `status` is the register's own value, or `unknown` when the source omits it; it is never inferred.
+
+## Paging and enumeration
+
+`artg_search` and `artg_list` take a 0-based `offset` and return `total`, `has_more` and `next_offset`, taken from the upstream's own `TotalRecords` — so paging is exact, not inferred from a full page. Measured 2026-09-25: the whole register is 97,087 entries; `entry_type: "Medicine Registered"` is 20,037, `"Medicine"` 34,379. A full sweep of registered medicines is ~201 calls.
+
+Arguments a tool does not implement are **refused with an error**, not ignored. Until fleet #2422 `offset` was accepted and silently dropped, so an enumeration loop re-read page one forever and reported success.
 
 ## Auth
 
@@ -30,6 +40,8 @@ The TGA's own documented ARTG Search tool — linked from tga.gov.au and, as of 
 - **The path segment must be uppercase `JSON`.** Lowercase `json` (the form quoted in most third-party documentation, including the aehrc client's own example config) 404s with a generic WCF "Endpoint not found" HTML page — which is a `200`-shaped failure if you don't check for an HTML body where JSON was expected. This pack throws explicitly if the response starts with `<`.
 - **`pagestart`/`pageend` are a 1-indexed, INCLUSIVE RECORD RANGE, not a page number.** `pagestart=3&pageend=5` returns records 3, 4 and 5 (three rows). Omitting both silently returns the **entire ARTG register** (25,000+ active entries) in ARTG-ID order, ignoring every other filter — every call here sends an explicit `pagestart=1`/`pageend=<limit>`.
 - **`ARTGValueSearch` filtered by `licenceid` alone returns the single full record** — there is no separate working lookup-by-ID endpoint on this host (`ARTGEntryJson` 404s), so `artg_entry` is built on the same search operation with `licenceid` as the only filter.
+- **`dateStart`/`dateEnd` are in the service's WSDL and do nothing.** Probed 2026-09-25 with ISO and dd/mm/yyyy formats, alone and with other filters: the total never changes. So `artg_recent` walks back from the tail of the ID-ordered register instead (IDs are issued sequentially; the newest entries are last) and stops at the first page entirely before `since`, scanning at most 500 entries and saying `complete: false` if that was not enough. It sees NEW entries only — a cancellation or variation to an existing entry carries no date here.
+- **Large ranges are slow.** 500 rows took 34s on 2026-09-25; pages are capped at 100.
 - **`www.tga.gov.au` is unreachable from our network — do not build against it.** `data.tga.gov.au` (a distinct host, no Akamai) is what actually answers.
 
 ## Quick Start
@@ -76,7 +88,7 @@ directly, instead of just this one's:
 }
 ```
 
-Both URLs reach the same gateway and the same 1679+ data sources. The
+Both URLs reach the same gateway and the same 1681+ data sources. The
 only difference is which pack's tools are listed **directly**; `ask_pipeworx`
 reaches all of them from either one.
 

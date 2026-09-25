@@ -665,9 +665,10 @@ function collapse(s: string): string {
  * 2. `pagestart`/`pageend` ARE A 1-INDEXED, INCLUSIVE RECORD RANGE, NOT A
  *    PAGE NUMBER. `pagestart=3&pageend=5` returns records 3, 4 and 5 (three
  *    rows), not "page 3 of 5". Omitting BOTH silently returns the ENTIRE
- *    ARTG register (currently 25,000+ active entries) in ARTG-ID order,
+ *    ARTG register (97,087 entries on 2026-09-25) in ARTG-ID order,
  *    ignoring every other filter — so every call here sends an explicit
- *    pagestart=1/pageend=<limit>.
+ *    range. Every response also carries `TotalRecords` for the filtered set,
+ *    which is what makes offset paging exact (artg_search / artg_list).
  *
  * `ARTGValueSearch` filtered by `licenceid` ALONE returns the single full
  * record (sponsor, every ingredient with strength, indications, PI/CMI
@@ -697,6 +698,49 @@ function notFound(reason: string, hint: string, extra: Record<string, unknown> =
   return { found: false, reason, hint, source: SOURCE, jurisdiction: 'Australia', ...extra };
 }
 
+// Every response says where it came from and when. This is a live proxy, so
+// the source date IS the fetch time — the register has no published version.
+const provenance = (url: URL) => ({
+  source: SOURCE,
+  source_url: url.toString(),
+  data_as_of: new Date().toISOString(),
+  jurisdiction: 'Australia',
+});
+
+// An argument this pack does not implement must be REFUSED, not dropped.
+// `offset` used to be accepted and silently ignored, so an enumeration loop
+// re-read page one forever and looked successful (fleet #2422). Underscore
+// args are gateway-injected plumbing and are exempt.
+function rejectUnknownArgs(tool: string, a: Record<string, unknown>, allowed: string[]) {
+  const unknown = Object.keys(a).filter((k) => !k.startsWith('_') && !allowed.includes(k));
+  if (unknown.length) {
+    throw new Error(
+      `${tool} does not accept ${unknown.map((k) => `"${k}"`).join(', ')}. Accepted arguments: ${allowed.join(', ')}.`,
+    );
+  }
+}
+
+// 0-based offset → the upstream's 1-indexed inclusive record range.
+function offsetArg(v: unknown): number {
+  if (v == null) return 0;
+  const n = Number(v);
+  if (!Number.isInteger(n) || n < 0) throw new Error(`offset must be a non-negative integer, got ${JSON.stringify(v)}.`);
+  return n;
+}
+
+function setRange(url: URL, offset: number, limit: number) {
+  url.searchParams.set('pagestart', String(offset + 1));
+  url.searchParams.set('pageend', String(offset + limit));
+}
+
+// The upstream reports TotalRecords for the whole filtered set, so paging is
+// exact rather than inferred from a full page.
+const paging = (total: number | undefined, offset: number, returned: number) => {
+  const t = typeof total === 'number' ? total : null;
+  const has_more = t != null ? offset + returned < t : null;
+  return { total: t, offset, count: returned, has_more, truncated: has_more, next_offset: has_more ? offset + returned : null };
+};
+
 // ---- upstream shapes (trimmed to what we read) -------------------------
 
 interface ArtgIngredient { Name?: string; Strength?: string; FormulationType?: string }
@@ -721,7 +765,7 @@ interface ArtgRow {
   ConsumerInformation?: { DocumentLink?: string };
 }
 
-async function artgSearch(url: URL): Promise<{ RequestedPageEnd?: number; RequestedPageStart?: number; Results?: ArtgRow[] }> {
+async function artgSearch(url: URL): Promise<{ RequestedPageEnd?: number; RequestedPageStart?: number; TotalRecords?: number; Results?: ArtgRow[] }> {
   const res = await pwFetch(url);
   if (!res.ok) throw await httpError(res, 'TGA ARTG');
   const text = await res.text();
@@ -744,7 +788,7 @@ const shapeSummaryRow = (r: ArtgRow) => ({
   name: r.Name ?? null,
   entry_type: r.EntryType ?? null,
   product_category: r.ProductCategory ?? null,
-  status: r.Status ?? null,
+  status: r.Status || 'unknown', // never guessed: absent upstream → 'unknown'
   start_date: r.StartDate ?? null,
   sponsor: r.Sponsor?.Name ?? null,
   active_ingredients: (r.Products ?? []).flatMap(activeIngredients),
@@ -752,7 +796,10 @@ const shapeSummaryRow = (r: ArtgRow) => ({
   cmi_document_url: r.ConsumerInformation?.DocumentLink || null,
 });
 
+const SEARCH_ARGS = ['name', 'ingredient', 'product', 'sponsor', 'manufacturer', 'entry_type', 'limit', 'offset'];
+
 async function search(a: Record<string, unknown>) {
+  rejectUnknownArgs('artg_search', a, SEARCH_ARGS);
   const name = a.name != null ? String(a.name).trim() : '';
   const ingredient = a.ingredient != null ? String(a.ingredient).trim() : '';
   const product = a.product != null ? String(a.product).trim() : '';
@@ -761,10 +808,12 @@ async function search(a: Record<string, unknown>) {
   if (!name && !ingredient && !product && !sponsor && !manufacturer) {
     return notFound(
       'no_search_terms',
-      'Pass at least one of name, ingredient, product, sponsor, or manufacturer. Example: {"ingredient": "paracetamol"}. Omitting every filter would return the entire ~25,000-entry register.',
+      'Pass at least one of name, ingredient, product, sponsor, or manufacturer. Example: {"ingredient": "paracetamol"}. To walk the whole register instead, use artg_list.',
     );
   }
+  const entryType = a.entry_type != null ? String(a.entry_type).trim() : '';
   const limit = clamp(a.limit, 25, 100);
+  const offset = offsetArg(a.offset);
 
   const url = new URL(`${BASE}/ARTGValueSearch/`);
   if (name) url.searchParams.set('name', name);
@@ -772,29 +821,138 @@ async function search(a: Record<string, unknown>) {
   if (product) url.searchParams.set('product', product);
   if (sponsor) url.searchParams.set('sponsor', sponsor);
   if (manufacturer) url.searchParams.set('manufacturer', manufacturer);
-  url.searchParams.set('pagestart', '1');
-  url.searchParams.set('pageend', String(limit));
+  if (entryType) url.searchParams.set('entrytype', entryType);
+  setRange(url, offset, limit);
+
+  const query = {
+    name: name || null, ingredient: ingredient || null, product: product || null,
+    sponsor: sponsor || null, manufacturer: manufacturer || null, entry_type: entryType || null,
+  };
+  const data = await artgSearch(url);
+  const rows = data.Results ?? [];
+  if (!rows.length) {
+    if (offset > 0 && typeof data.TotalRecords === 'number' && data.TotalRecords > 0) {
+      return notFound(
+        'offset_past_end',
+        `offset ${offset} is past the end of this result set, which has ${data.TotalRecords} entries.`,
+        { ...query, total: data.TotalRecords, offset, source_url: url.toString() },
+      );
+    }
+    return notFound(
+      'no_artg_entries',
+      'No Australian ARTG entry matched. ARTG covers goods approved for supply in Australia only — a drug authorised elsewhere may not be registered here under the same name.',
+      { ...query, source_url: url.toString() },
+    );
+  }
+  return {
+    ...provenance(url),
+    query,
+    ...paging(data.TotalRecords, offset, rows.length),
+    entries: rows.map(shapeSummaryRow),
+  };
+}
+
+// ---- enumeration: the whole register, in ARTG-ID order ------------------
+
+async function list(a: Record<string, unknown>) {
+  rejectUnknownArgs('artg_list', a, ['entry_type', 'limit', 'offset']);
+  const entryType = a.entry_type != null ? String(a.entry_type).trim() : '';
+  const limit = clamp(a.limit, 100, 100);
+  const offset = offsetArg(a.offset);
+
+  const url = new URL(`${BASE}/ARTGValueSearch/`);
+  if (entryType) url.searchParams.set('entrytype', entryType);
+  setRange(url, offset, limit);
 
   const data = await artgSearch(url);
   const rows = data.Results ?? [];
   if (!rows.length) {
     return notFound(
-      'no_artg_entries',
-      'No Australian ARTG entry matched. ARTG covers goods approved for supply in Australia only — a drug authorised elsewhere may not be registered here under the same name.',
-      { name: name || null, ingredient: ingredient || null, product: product || null, sponsor: sponsor || null, manufacturer: manufacturer || null },
+      offset > 0 && (data.TotalRecords ?? 0) > 0 ? 'offset_past_end' : 'no_artg_entries',
+      entryType
+        ? `No ARTG entries for entry_type "${entryType}" at offset ${offset}. entry_type matches the start of the ARTG entry type, e.g. "Medicine", "Medicine Registered", "Medicine Listed", "Biological", "Medical Device".`
+        : `No ARTG entries at offset ${offset}.`,
+      { entry_type: entryType || null, total: data.TotalRecords ?? null, offset, source_url: url.toString() },
     );
   }
   return {
-    source: SOURCE,
-    jurisdiction: 'Australia',
-    query: { name: name || null, ingredient: ingredient || null, product: product || null, sponsor: sponsor || null, manufacturer: manufacturer || null },
-    count: rows.length,
-    truncated: rows.length === limit,
+    ...provenance(url),
+    order: 'ARTG ID ascending (IDs are issued sequentially, so the newest entries are at the end)',
+    entry_type: entryType || null,
+    ...paging(data.TotalRecords, offset, rows.length),
     entries: rows.map(shapeSummaryRow),
   };
 }
 
+// ---- recent additions: walk back from the tail of the ID-ordered register ----
+//
+// The upstream's dateStart/dateEnd parameters exist in its WSDL but are
+// IGNORED (probed 2026-09-25: every date format returns the unfiltered
+// total), so there is no server-side date filter. IDs are issued in sequence,
+// so new entries sit at the tail; we page backwards until a whole page starts
+// before `since`. This sees NEW entries only — a cancellation or variation to
+// an existing entry does not move it, and the response says so.
+
+const RECENT_PAGE = 100;
+const RECENT_MAX_PAGES = 5;
+
+async function recent(a: Record<string, unknown>) {
+  rejectUnknownArgs('artg_recent', a, ['since', 'entry_type']);
+  const since = a.since != null ? String(a.since).trim() : '';
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(since) || Number.isNaN(Date.parse(since))) {
+    return notFound('bad_since', 'Pass since as an ISO date, e.g. {"since": "2026-09-01"}.', { since: since || null });
+  }
+  const entryType = a.entry_type != null ? String(a.entry_type).trim() : '';
+
+  const make = (offset: number, limit: number) => {
+    const u = new URL(`${BASE}/ARTGValueSearch/`);
+    if (entryType) u.searchParams.set('entrytype', entryType);
+    setRange(u, offset, limit);
+    return u;
+  };
+
+  // One-row probe for the current total, then walk back from the end.
+  const probeUrl = make(0, 1);
+  const total = (await artgSearch(probeUrl)).TotalRecords;
+  if (typeof total !== 'number') {
+    throw new Error('TGA ARTG did not report TotalRecords, so the end of the register cannot be located.');
+  }
+
+  const found: ArtgRow[] = [];
+  let end = total;
+  let pages = 0;
+  let reachedSince = false;
+  let lastUrl = probeUrl;
+  while (end > 0 && pages < RECENT_MAX_PAGES) {
+    const start = Math.max(0, end - RECENT_PAGE);
+    lastUrl = make(start, end - start);
+    const rows = (await artgSearch(lastUrl)).Results ?? [];
+    pages++;
+    const hits = rows.filter((r) => (r.StartDate ?? '') >= since);
+    found.push(...hits);
+    if (rows.every((r) => (r.StartDate ?? '') < since)) { reachedSince = true; break; }
+    end = start;
+  }
+  if (end <= 0) reachedSince = true;
+
+  found.sort((x, y) => Number(y.LicenceId ?? 0) - Number(x.LicenceId ?? 0));
+  return {
+    ...provenance(lastUrl),
+    since,
+    entry_type: entryType || null,
+    change_types_covered: ['new_entry'],
+    not_covered: 'Cancellations, suspensions and variations to existing entries are not exposed by this source with a date, so they are not reported here. Re-read an entry with artg_entry to see its current status.',
+    count: found.length,
+    complete: reachedSince,
+    note: reachedSince
+      ? undefined
+      : `Stopped after scanning the newest ${pages * RECENT_PAGE} entries without reaching ${since}; there are more. Use a later since, or walk the register with artg_list.`,
+    entries: found.map(shapeSummaryRow),
+  };
+}
+
 async function entry(a: Record<string, unknown>) {
+  rejectUnknownArgs('artg_entry', a, ['id']);
   const id = a.id != null ? String(a.id).trim() : '';
   if (!id) {
     return notFound('no_id', 'Pass id, the ARTG number (LicenceId), e.g. {"id": "10109"}. Find one with artg_search.');
@@ -807,7 +965,7 @@ async function entry(a: Record<string, unknown>) {
   const data = await artgSearch(url);
   const rows = data.Results ?? [];
   if (!rows.length) {
-    return notFound('artg_id_not_found', `No ARTG entry with id "${id}". Find a valid one with artg_search.`, { id });
+    return notFound('artg_id_not_found', `No ARTG entry with id "${id}". Find a valid one with artg_search.`, { id, source_url: url.toString() });
   }
   const r = rows[0];
   const products = (r.Products ?? []).map((p) => ({
@@ -823,13 +981,12 @@ async function entry(a: Record<string, unknown>) {
     specific_indications: p.SpecificIndications ?? [],
   }));
   return {
-    source: SOURCE,
-    jurisdiction: 'Australia',
+    ...provenance(url),
     artg_id: r.LicenceId ?? null,
     name: r.Name ?? null,
     entry_type: r.EntryType ?? null,
     product_category: r.ProductCategory ?? null,
-    status: r.Status ?? null,
+    status: r.Status || 'unknown', // never guessed: absent upstream → 'unknown'
     start_date: r.StartDate ?? null,
     sponsor: r.Sponsor?.Name ?? null,
     products,
@@ -844,7 +1001,7 @@ const tools: McpToolExport['tools'] = [
   {
     name: 'artg_search',
     description:
-      'Search the Australian Register of Therapeutic Goods (ARTG) — every medicine, biological and medical device approved for supply in Australia — by product name, active ingredient, sponsor, or manufacturer. Returns each entry\'s ARTG ID, entry type (e.g. "Medicine Registered", "Medicine Listed"), sponsor, active ingredients, status, and links to its Product Information (PI, prescriber label) and Consumer Medicine Information (CMI, patient leaflet) documents. Answers "is X approved in Australia", "which Australian products contain ibuprofen", "who sponsors X in Australia". This calls the TGA\'s own JSON web service directly (data.tga.gov.au) rather than the interactive ARTG Search web tool. Example: artg_search({ ingredient: "paracetamol" }); artg_search({ sponsor: "Pfizer" }). Keyless.',
+      'Search the Australian Register of Therapeutic Goods (ARTG) — every medicine, biological and medical device approved for supply in Australia — by product name, active ingredient, sponsor, or manufacturer. Returns each entry\'s ARTG ID, entry type (e.g. "Medicine Registered", "Medicine Listed"), sponsor, active ingredients, status, and links to its Product Information (PI, prescriber label) and Consumer Medicine Information (CMI, patient leaflet) documents. Answers "is X approved in Australia", "which Australian products contain ibuprofen", "who sponsors X in Australia". This calls the TGA\'s own JSON web service directly (data.tga.gov.au) rather than the interactive ARTG Search web tool. Paged: the response carries total, has_more and next_offset — pass offset to fetch the next page. Example: artg_search({ ingredient: "paracetamol" }); artg_search({ ingredient: "amoxicillin", offset: 100 }). Keyless.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -853,7 +1010,9 @@ const tools: McpToolExport['tools'] = [
         product: { type: 'string', description: 'Product name fragment (device/product-level, distinct from name)' },
         sponsor: { type: 'string', description: 'Sponsor (marketing-authorisation holder) name, e.g. "Pfizer"' },
         manufacturer: { type: 'string', description: 'Manufacturer name' },
+        entry_type: { type: 'string', description: 'Restrict to an ARTG entry type; matches its start, e.g. "Medicine", "Medicine Registered", "Medicine Listed", "Biological", "Medical Device"' },
         limit: { type: 'number', description: 'Max entries to return (default 25, max 100)' },
+        offset: { type: 'number', description: 'Number of matching entries to skip (0-based). Use next_offset from the previous response to page.' },
       },
     },
   },
@@ -867,12 +1026,40 @@ const tools: McpToolExport['tools'] = [
       required: ['id'],
     },
   },
+  {
+    name: 'artg_list',
+    description:
+      'Walk the ENTIRE Australian Register of Therapeutic Goods (ARTG), in ARTG ID order, 100 entries per page — for bulk ingestion or counting, not for answering a question about one drug (use artg_search for that). Optionally restrict to one entry type ("Medicine Registered" ≈ 20,000 prescription/registered medicines; "Medicine" ≈ 34,000 incl. listed). Returns total, has_more and next_offset; pass offset to continue. Each row carries ARTG ID, name, entry type, sponsor, active ingredients, status, start date and PI/CMI links; use artg_entry for indications. Example: artg_list({ entry_type: "Medicine Registered", offset: 0 }). Keyless.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        entry_type: { type: 'string', description: 'Restrict to an ARTG entry type; matches its start, e.g. "Medicine", "Medicine Registered", "Medical Device". Omit for the whole register.' },
+        offset: { type: 'number', description: 'Entries to skip (0-based). Use next_offset from the previous page.' },
+        limit: { type: 'number', description: 'Entries per page (default and max 100)' },
+      },
+    },
+  },
+  {
+    name: 'artg_recent',
+    description:
+      'New entries added to the Australian Register of Therapeutic Goods (ARTG) since a date — newly registered or listed medicines, biologicals and devices approved for supply in Australia. Covers NEW entries only: cancellations and variations to existing entries are not dated by the source and are not reported. Scans the newest ~500 entries; reports complete=false if the date is further back than that. Example: artg_recent({ since: "2026-09-15", entry_type: "Medicine" }). Keyless.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        since: { type: 'string', description: 'ISO date (YYYY-MM-DD); entries whose start date is on or after it' },
+        entry_type: { type: 'string', description: 'Restrict to an ARTG entry type, e.g. "Medicine", "Medicine Registered"' },
+      },
+      required: ['since'],
+    },
+  },
 ];
 
 async function callTool(name: string, args: Record<string, unknown>): Promise<unknown> {
   switch (name) {
     case 'artg_search': return search(args);
     case 'artg_entry': return entry(args);
+    case 'artg_list': return list(args);
+    case 'artg_recent': return recent(args);
     default: throw new Error(`Unknown tool: ${name}`);
   }
 }

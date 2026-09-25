@@ -1,0 +1,18 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.pipeworx-io/tga-artg",
+  "title": "Tga Artg",
+  "description": "TGA ARTG — the Australian Register of Therapeutic Goods, the Therapeutic",
+  "version": "0.1.0",
+  "websiteUrl": "https://pipeworx.io/packs/tga-artg",
+  "repository": {
+    "url": "https://github.com/pipeworx-io/mcp-tga-artg",
+    "source": "github"
+  },
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://gateway.pipeworx.io/tga-artg/mcp"
+    }
+  ]
+}

@@ -1,6 +1,6 @@
 {
   "name": "@pipeworx/mcp-tga-artg",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "TGA ARTG — the Australian Register of Therapeutic Goods, the Therapeutic",
   "type": "module",
   "main": "src/index.ts",
@@ -26,7 +26,7 @@
     "@cloudflare/workers-types": "^4.20260405.1"
   },
   "pipeworx": {
-    "sourceHash": "v1-bfe7fe7771f5e2be4937856022e3975a68d750a30322854183fe771c2cbeb3b0",
-    "sourceCommit": "e800534af167c6571881f84e545e86cfc7c9d7d4"
+    "sourceHash": "v1-413cdae533db9b7ce213112ae6c9634a970c513291aa37e3d94ecde2305ae510",
+    "sourceCommit": "66a0692f029179984440cef6938cba7fdd41d66d"
   }
 }

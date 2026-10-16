@@ -1,7 +1,7 @@
 {
   "name": "@pipeworx/mcp-tga-artg",
-  "version": "0.1.2",
-  "description": "TGA ARTG — the Australian Register of Therapeutic Goods, the Therapeutic",
+  "version": "0.1.3",
+  "description": "TGA ARTG — the Australian Register of Therapeutic Goods, the Therapeutic Goods Administration's register of every medicine, biological and medical device approved for supply in AUSTRALIA.",
   "type": "module",
   "main": "src/index.ts",
   "types": "src/index.ts",
@@ -26,7 +26,7 @@
     "@cloudflare/workers-types": "^4.20260405.1"
   },
   "pipeworx": {
-    "sourceHash": "v1-413cdae533db9b7ce213112ae6c9634a970c513291aa37e3d94ecde2305ae510",
-    "sourceCommit": "66a0692f029179984440cef6938cba7fdd41d66d"
+    "sourceHash": "v1-bdd214507694fc6ce127efb474c5e415c2a01316d36d8dee46cd00eb137f9c91",
+    "sourceCommit": "a03f96ed672b8c149593c64ecbf30280cabf084c"
   }
 }

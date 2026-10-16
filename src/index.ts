@@ -834,6 +834,13 @@ const shapeSummaryRow = (r: ArtgRow) => ({
 const SEARCH_ARGS = ['name', 'ingredient', 'product', 'sponsor', 'manufacturer', 'entry_type', 'limit', 'offset'];
 
 async function search(a: Record<string, unknown>) {
+  // `query` is the argument name most callers reach for first; it was hard-
+  // rejected here (the tool's only "error" in a 24h window, 2026-10-16) when a
+  // plain alias to `name` answers the question. Explicit name wins if both come.
+  if (a.query != null) {
+    const { query, ...rest } = a;
+    a = rest.name == null ? { ...rest, name: query } : rest;
+  }
   rejectUnknownArgs('artg_search', a, SEARCH_ARGS);
   const name = a.name != null ? String(a.name).trim() : '';
   const ingredient = a.ingredient != null ? String(a.ingredient).trim() : '';
@@ -1041,6 +1048,7 @@ const tools: McpToolExport['tools'] = [
       type: 'object',
       properties: {
         name: { type: 'string', description: 'Product/trade name, e.g. "Panadol"' },
+        query: { type: 'string', description: 'Alias of name, accepted because routers and callers commonly send "query". Prefer name or ingredient.' },
         ingredient: { type: 'string', description: 'Active ingredient, e.g. "paracetamol", "ibuprofen"' },
         product: { type: 'string', description: 'Product name fragment (device/product-level, distinct from name)' },
         sponsor: { type: 'string', description: 'Sponsor (marketing-authorisation holder) name, e.g. "Pfizer"' },

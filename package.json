@@ -1,12 +1,20 @@
 {
   "name": "@pipeworx/mcp-tga-artg",
-  "version": "0.1.3",
+  "version": "0.2.0",
   "description": "TGA ARTG — the Australian Register of Therapeutic Goods, the Therapeutic Goods Administration's register of every medicine, biological and medical device approved for supply in AUSTRALIA.",
   "type": "module",
-  "main": "src/index.ts",
-  "types": "src/index.ts",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./tools.json": "./tools.json",
+    "./package.json": "./package.json"
+  },
   "bin": {
     "mcp-tga-artg": "bin/cli.js"
+  },
+  "files": ["bin/", "lib/", "tools.json", "server.json"],
+  "engines": {
+    "node": ">=18"
   },
   "keywords": ["mcp", "mcp-server", "model-context-protocol", "pipeworx", "tga-artg"],
   "license": "MIT",
@@ -14,19 +22,12 @@
     "type": "git",
     "url": "git+https://github.com/pipeworx-io/mcp-tga-artg.git"
   },
-  "scripts": {
-    "typecheck": "tsc --noEmit"
-  },
-  "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.30.0",
-    "tsx": "^4.19.0"
-  },
-  "devDependencies": {
-    "typescript": "^5.9.3",
-    "@cloudflare/workers-types": "^4.20260405.1"
-  },
+  "mcpName": "io.github.pipeworx-io/tga-artg",
   "pipeworx": {
-    "sourceHash": "v1-bdd214507694fc6ce127efb474c5e415c2a01316d36d8dee46cd00eb137f9c91",
-    "sourceCommit": "a03f96ed672b8c149593c64ecbf30280cabf084c"
+    "mode": "gateway",
+    "slug": "tga-artg",
+    "gatewaySlug": "tga-artg",
+    "sourceHash": "v1-d5e3ab8fe97b4e43fd931b2748e483af7f22aeddc8194375ff0a96daa225b07b",
+    "sourceCommit": "f47d581679e1e887373df51ba623f891fbe4c464"
   }
 }
